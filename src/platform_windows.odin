@@ -2,15 +2,20 @@ package platform
 
 import win32 "core:sys/windows"
 import "core:fmt"
-import "core:log"
 import "core:dynlib"
+import "core:strings"
 import vk "vendor:vulkan"
+import "vendor:glfw"
 
 gRunning: bool = true
 
 main :: proc()
 {
-  init_vulkan()
+  vkInstance, ok := init_vulkan()
+  if !ok
+  {
+    return
+  }
 //  window, ok := init_window(800, 600)
 //  if !ok do return
 //  for gRunning
@@ -36,7 +41,7 @@ init_window :: proc(width, height: i32) -> (window: win32.HWND, ok: bool)
   }
   if !bool(win32.RegisterClassW(&windowClass))
   {
-    log.log(log.Level.Error, "Registering the class failed!")
+    fmt.eprintfln("Registering the class failed!")
     return nil, false
   }
   result_window := win32.CreateWindowExW(
@@ -88,14 +93,14 @@ init_vulkan :: proc() -> (instance: vk.Instance, ok: bool)
   defer dynlib.unload_library(vulkanLoader)
   if !loaded
   {
-    log.log(log.Level.Error, dynlib.last_error())
-    return
+    fmt.eprintfln(dynlib.last_error())
+    return nil, false
   }
   ptr, found := dynlib.symbol_address(vulkanLoader, "vkGetInstanceProcAddr")
   if !found
   {
-    log.log(log.Level.Error, dynlib.last_error())
-    return
+    fmt.eprintfln(dynlib.last_error())
+    return nil, false
   }
   vkGetInstanceProcAddr := ptr
   vk.load_proc_addresses_global(vkGetInstanceProcAddr)
@@ -103,13 +108,77 @@ init_vulkan :: proc() -> (instance: vk.Instance, ok: bool)
   vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, nil)
   properties := make_slice([]vk.ExtensionProperties, cast(int)extensionCount, context.temp_allocator)
   vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, raw_data(properties))
-  // just enable all of them baby!
-  // TODO: figure out how to add only necessery extensions
-  extension_names := make_slice([]cstring, cast(int)extensionCount, context.temp_allocator)
+  // TODO: save information about what extensions are available
+  extensionNames := make_slice([]cstring, cast(int)extensionCount, context.temp_allocator)
+
   for i : u32 = 0; i < extensionCount; i += 1 
   {
-    extension_names[i] = cstring(raw_data(properties[i].extensionName[:]))
+    extensionNames[i] = cstring(raw_data(properties[i].extensionName[:]))
   }
+
+  fmt.printfln("Available extensions (count: %v)", extensionCount)
+  for ext, i in extensionNames
+  {
+    fmt.printfln("%v: %v", i, ext)
+  }
+
+  contains :: proc(cstr_array: []cstring, looked_for: string) -> bool
+  {
+    str := looked_for
+    for cstr in cstr_array
+    {
+      curr_str := string(cstr)
+      if strings.compare(str, curr_str) == 0 do return true
+    }
+    return false
+  }
+
+  requiredExtensions :: [?]string{
+    "VK_KHR_surface", 
+    "VK_KHR_win32_surface"
+  }
+  valid := true
+  for requiredExtension in requiredExtensions
+  {
+    if !contains(extensionNames, requiredExtension)
+    {
+      fmt.eprintfln("Device does support required extension: %v", requiredExtension)
+      valid = false
+    }
+  }
+  if !valid do return nil, false
+
+  valLayerCount: u32
+  vk.EnumerateInstanceLayerProperties(&valLayerCount, nil)
+  validationLayerProperties := make_slice([]vk.LayerProperties, cast(int)valLayerCount, context.temp_allocator)
+  vk.EnumerateInstanceLayerProperties(&valLayerCount, raw_data(validationLayerProperties))
+  valLayerNames := make_slice([]cstring, cast(int)valLayerCount, context.temp_allocator)
+  for i : u32 = 0; i < valLayerCount; i += 1 
+  {
+    valLayerNames[i] = cstring(raw_data(validationLayerProperties[i].layerName[:]))
+  }
+  fmt.printfln("Available validation layers (count: %v)", valLayerCount)
+  for ext, i in valLayerNames
+  {
+    fmt.printfln("%v: %v", i, ext)
+  }
+
+  when ODIN_DEBUG
+  {
+    requiredValLayers :: [?]string{
+      "VK_LAYER_KHRONOS_validation"
+    }
+    for requiredValLayer in requiredValLayers
+    {
+      if !contains(valLayerNames, requiredValLayer)
+      {
+        valid = false
+        fmt.eprintfln("Device does support required validation layer: %v", requiredValLayer)
+      }
+    }
+    if !valid do return nil, false
+  }
+
   appInfo: vk.ApplicationInfo = {
     sType = vk.StructureType.APPLICATION_INFO,
     pApplicationName = "Hello triangle",
@@ -122,13 +191,19 @@ init_vulkan :: proc() -> (instance: vk.Instance, ok: bool)
     sType = vk.StructureType.INSTANCE_CREATE_INFO,
     pApplicationInfo = &appInfo,
     enabledExtensionCount = extensionCount,
-    ppEnabledExtensionNames = raw_data(extension_names)
+    ppEnabledExtensionNames = raw_data(extensionNames) // just enable all of them baby!
   }
+  when ODIN_DEBUG
+  {
+    createInfo.enabledLayerCount = valLayerCount
+    createInfo.ppEnabledLayerNames = raw_data(valLayerNames)
+  }
+
   vulkan_instance: vk.Instance
   result := vk.CreateInstance(&createInfo, nil, &vulkan_instance)
   if (result != vk.Result.SUCCESS)
   {
-    log.log(log.Level.Error, "could not create instance!")
+    fmt.eprintfln("could not create instance!")
     return nil, false
   }
   return instance, true
