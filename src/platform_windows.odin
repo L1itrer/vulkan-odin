@@ -11,12 +11,28 @@ gRunning: bool = true
 
 main :: proc()
 {
-  vkInstance, ok := init_vulkan()
+  // NOTE: loading dlls on windows is fucked up apparently
+  // TODO: unhardcode this string
+  vulkanLoader, loaded := dynlib.load_library("C:/Windows/System32/vulkan-1.dll")
+  defer dynlib.unload_library(vulkanLoader)
+  if !loaded
+  {
+    fmt.eprintfln(dynlib.last_error())
+    return
+  }
+  vkGetInstanceProcAddr, found := dynlib.symbol_address(vulkanLoader, "vkGetInstanceProcAddr")
+  if !found
+  {
+    fmt.eprintfln(dynlib.last_error())
+    return
+  }
+  vkInstance, ok := init_vulkan(vkGetInstanceProcAddr)
+  defer vk.DestroyInstance(vkInstance, nil)
   if !ok
   {
     return
   }
-//  window, ok := init_window(800, 600)
+//  window, ok := win32_init_window(800, 600)
 //  if !ok do return
 //  for gRunning
 //  {
@@ -30,7 +46,7 @@ main :: proc()
 //  }
 }
 
-init_window :: proc(width, height: i32) -> (window: win32.HWND, ok: bool)
+win32_init_window :: proc(width, height: i32) -> (window: win32.HWND, ok: bool)
 {
   instance := cast(win32.HINSTANCE)win32.GetModuleHandleW(nil)
   windowClass: win32.WNDCLASSW = {
@@ -49,7 +65,7 @@ init_window :: proc(width, height: i32) -> (window: win32.HWND, ok: bool)
     lpClassName = windowClass.lpszClassName,
     lpWindowName = win32.utf8_to_wstring("Vulkan triangle"),
     dwStyle = win32.WS_OVERLAPPED | win32.WS_VISIBLE | win32.WS_SYSMENU |
-    win32.WS_MINIMIZEBOX | win32.WS_MINIMIZEBOX | win32.WS_CAPTION,
+      win32.WS_MINIMIZEBOX | win32.WS_MINIMIZEBOX | win32.WS_CAPTION,
     X = win32.CW_USEDEFAULT, Y = win32.CW_USEDEFAULT,
     nWidth = width, nHeight = height,
     hWndParent = nil, hMenu = nil, hInstance = instance, lpParam = nil
@@ -85,24 +101,9 @@ win32_window_proc :: proc "stdcall" (windowHandle: win32.HWND, message: u32, wPa
   return result
 }
 
-init_vulkan :: proc() -> (instance: vk.Instance, ok: bool)
+
+init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok: bool)
 {
-  // NOTE: loading dlls on windows is fucked up apparently
-  // TODO: unhardcode this string
-  vulkanLoader, loaded := dynlib.load_library("C:/Windows/System32/vulkan-1.dll")
-  defer dynlib.unload_library(vulkanLoader)
-  if !loaded
-  {
-    fmt.eprintfln(dynlib.last_error())
-    return nil, false
-  }
-  ptr, found := dynlib.symbol_address(vulkanLoader, "vkGetInstanceProcAddr")
-  if !found
-  {
-    fmt.eprintfln(dynlib.last_error())
-    return nil, false
-  }
-  vkGetInstanceProcAddr := ptr
   vk.load_proc_addresses_global(vkGetInstanceProcAddr)
   extensionCount : u32
   vk.EnumerateInstanceExtensionProperties(nil, &extensionCount, nil)
@@ -198,13 +199,74 @@ init_vulkan :: proc() -> (instance: vk.Instance, ok: bool)
     createInfo.enabledLayerCount = valLayerCount
     createInfo.ppEnabledLayerNames = raw_data(valLayerNames)
   }
+  // TODO: setup non-default debug message printing
 
-  vulkan_instance: vk.Instance
-  result := vk.CreateInstance(&createInfo, nil, &vulkan_instance)
+  vulkanInstance: vk.Instance
+  result := vk.CreateInstance(&createInfo, nil, &vulkanInstance)
   if (result != vk.Result.SUCCESS)
   {
     fmt.eprintfln("could not create instance!")
     return nil, false
   }
-  return instance, true
+  vk.load_proc_addresses_instance(vulkanInstance)
+  fmt.println("Vulkan procedure loading succsessful")
+
+  // device selection
+  deviceCount: u32
+  vulkanDevice: vk.PhysicalDevice
+  vk.EnumeratePhysicalDevices(vulkanInstance, &deviceCount, nil)
+  if deviceCount == 0
+  {
+    fmt.eprintfln("This mashine has no suitable vulkan devices")
+    return vulkanInstance, false
+  }
+
+  devices := make_slice([]vk.PhysicalDevice, cast(int)deviceCount, context.temp_allocator)
+  vk.EnumeratePhysicalDevices(vulkanInstance, &deviceCount, raw_data(devices))
+  for device, i in devices
+  {
+    if device_suitable(device)
+    {
+      fmt.println("Found a suitable vulkan device")
+      vulkanDevice = device
+      break
+    }
+  }
+  if vulkanDevice == nil
+  {
+    fmt.eprintfln("This mashine has no suitable vulkan devices")
+    return vulkanInstance, false
+  }
+
+  return vulkanInstance, true
+}
+
+device_suitable :: proc(device: vk.PhysicalDevice) -> bool
+{
+  familyIndex, ok := queueFamiliesFind(device)
+  return ok
+}
+
+queueFamiliesFind :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, bool)
+{
+  queueFamilyCount: u32 = ---
+  queueFamilyIndex: QueueFamilyIndecies
+  vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
+  families := make_slice([]vk.QueueFamilyProperties, cast(int)queueFamilyCount, context.temp_allocator)
+  i: u32
+  for family in families
+  {
+    if vk.QueueFlag.GRAPHICS in family.queueFlags
+    {
+      queueFamilyIndex.graphicsFamily = i
+      return queueFamilyIndex, true
+    }
+    i += 1
+  }
+  return queueFamilyIndex, false
+}
+
+QueueFamilyIndecies :: struct
+{
+  graphicsFamily: u32
 }
