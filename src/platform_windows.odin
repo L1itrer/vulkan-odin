@@ -9,6 +9,7 @@ import "vendor:glfw"
 
 gRunning: bool = true
 
+
 main :: proc()
 {
   // NOTE: loading dlls on windows is fucked up apparently
@@ -26,24 +27,24 @@ main :: proc()
     fmt.eprintfln(dynlib.last_error())
     return
   }
-  vkInstance, ok := init_vulkan(vkGetInstanceProcAddr)
-  defer vk.DestroyInstance(vkInstance, nil)
+  vk, ok := init_vulkan(vkGetInstanceProcAddr)
+  defer vulkan_release(vk) 
   if !ok
   {
     return
   }
-//  window, ok := win32_init_window(800, 600)
-//  if !ok do return
-//  for gRunning
-//  {
-//    message: win32.MSG
-//    for win32.PeekMessageW(&message, nil, 0, 0, win32.PM_REMOVE)
-//    {
-//      if message.message == win32.WM_QUIT do gRunning = false
-//      win32.TranslateMessage(&message)
-//      win32.DispatchMessageW(&message)
-//    }
-//  }
+  window, ok_wnd := win32_init_window(800, 600)
+  if !ok_wnd do return
+  for gRunning
+  {
+    message: win32.MSG
+    for win32.PeekMessageW(&message, nil, 0, 0, win32.PM_REMOVE)
+    {
+      if message.message == win32.WM_QUIT do gRunning = false
+      win32.TranslateMessage(&message)
+      win32.DispatchMessageW(&message)
+    }
+  }
 }
 
 win32_init_window :: proc(width, height: i32) -> (window: win32.HWND, ok: bool)
@@ -101,8 +102,22 @@ win32_window_proc :: proc "stdcall" (windowHandle: win32.HWND, message: u32, wPa
   return result
 }
 
+when ODIN_DEBUG 
+{
+  USE_VALIDATION_LAYERS :: true
+}
+else
+{
+  USE_VALIDATION_LAYERS :: false
+}
 
-init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok: bool)
+VulkanHandles :: struct{
+  instance: vk.Instance,
+  device: vk.Device,
+  graphicsQueue: vk.Queue,
+}
+
+init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, ok: bool)
 {
   vk.load_proc_addresses_global(vkGetInstanceProcAddr)
   extensionCount : u32
@@ -147,7 +162,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
       valid = false
     }
   }
-  if !valid do return nil, false
+  if !valid do return {}, false
 
   valLayerCount: u32
   vk.EnumerateInstanceLayerProperties(&valLayerCount, nil)
@@ -164,7 +179,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
     fmt.printfln("%v: %v", i, ext)
   }
 
-  when ODIN_DEBUG
+  when USE_VALIDATION_LAYERS
   {
     requiredValLayers :: [?]string{
       "VK_LAYER_KHRONOS_validation"
@@ -177,7 +192,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
         fmt.eprintfln("Device does support required validation layer: %v", requiredValLayer)
       }
     }
-    if !valid do return nil, false
+    if !valid do return {}, false
   }
 
   appInfo: vk.ApplicationInfo = {
@@ -194,7 +209,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
     enabledExtensionCount = extensionCount,
     ppEnabledExtensionNames = raw_data(extensionNames) // just enable all of them baby!
   }
-  when ODIN_DEBUG
+  when USE_VALIDATION_LAYERS
   {
     createInfo.enabledLayerCount = valLayerCount
     createInfo.ppEnabledLayerNames = raw_data(valLayerNames)
@@ -203,10 +218,11 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
 
   vulkanInstance: vk.Instance
   result := vk.CreateInstance(&createInfo, nil, &vulkanInstance)
+  handles.instance = vulkanInstance
   if (result != vk.Result.SUCCESS)
   {
     fmt.eprintfln("could not create instance!")
-    return nil, false
+    return {}, false
   }
   vk.load_proc_addresses_instance(vulkanInstance)
   fmt.println("Vulkan procedure loading succsessful")
@@ -218,7 +234,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
   if deviceCount == 0
   {
     fmt.eprintfln("This mashine has no suitable vulkan devices")
-    return vulkanInstance, false
+    return handles, false
   }
 
   devices := make_slice([]vk.PhysicalDevice, cast(int)deviceCount, context.temp_allocator)
@@ -235,24 +251,62 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (instance: vk.Instance, ok
   if vulkanDevice == nil
   {
     fmt.eprintfln("This mashine has no suitable vulkan devices")
-    return vulkanInstance, false
+    return handles, false
+  }
+  indicies := queue_families_find(vulkanDevice)
+  deviceFeatures := [1]vk.PhysicalDeviceFeatures{}
+  queuePriority := [1]f32{1.0}
+  queueCreateInfo: [1]vk.DeviceQueueCreateInfo = {
+    {
+      sType = vk.StructureType.DEVICE_QUEUE_CREATE_INFO,
+      queueFamilyIndex = indicies.graphicsFamily,
+      queueCount = 1,
+      pQueuePriorities = raw_data(queuePriority[:])
+    }
+  }
+  deviceCreateInfo := vk.DeviceCreateInfo {
+    sType = vk.StructureType.DEVICE_CREATE_INFO,
+    pQueueCreateInfos = raw_data(queueCreateInfo[:]),
+    pEnabledFeatures = raw_data(deviceFeatures[:]),
+  }
+  when USE_VALIDATION_LAYERS
+  {
+    deviceCreateInfo.enabledLayerCount = valLayerCount
+    deviceCreateInfo.ppEnabledLayerNames = raw_data(valLayerNames)
   }
 
-  return vulkanInstance, true
+  logicalDevice: vk.Device
+  result = vk.CreateDevice(vulkanDevice, &deviceCreateInfo, nil, &logicalDevice)
+  if result != vk.Result.SUCCESS
+  {
+    fmt.eprintln("Could not instantiate logical device")
+    return handles, false
+  }
+  handles.device = logicalDevice
+  vk.GetDeviceQueue(handles.device, indicies.graphicsFamily, 0, &handles.graphicsQueue)
+
+  return handles, true
+}
+
+vulkan_release :: proc(handles: VulkanHandles)
+{
+  vk.DestroyDevice(handles.device, nil)
+  vk.DestroyInstance(handles.instance, nil)
 }
 
 device_suitable :: proc(device: vk.PhysicalDevice) -> bool
 {
-  familyIndex, ok := queueFamiliesFind(device)
+  familyIndex, ok := queue_families_find(device)
   return ok
 }
 
-queueFamiliesFind :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, bool)
+queue_families_find :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, bool) #optional_ok
 {
   queueFamilyCount: u32 = ---
   queueFamilyIndex: QueueFamilyIndecies
   vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nil)
   families := make_slice([]vk.QueueFamilyProperties, cast(int)queueFamilyCount, context.temp_allocator)
+  vk.GetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, raw_data(families[:]))
   i: u32
   for family in families
   {
