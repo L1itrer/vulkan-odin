@@ -12,19 +12,20 @@ gRunning: bool = true
 
 main :: proc()
 {
-  // NOTE: loading dlls on windows is fucked up apparently
-  // TODO: unhardcode this string
-  vulkanLoader, loaded := dynlib.load_library("C:/Windows/System32/vulkan-1.dll")
-  defer dynlib.unload_library(vulkanLoader)
-  if !loaded
+  vulkanLoader := win32.LoadLibraryW(win32.utf8_to_wstring_alloc("vulkan-1.dll"))
+  if vulkanLoader == nil
   {
-    fmt.eprintfln(dynlib.last_error())
+    err := win32.GetLastError()
+    fmt.println("Could not locate vulkan dll: ", err)
     return
   }
-  vkGetInstanceProcAddr, found := dynlib.symbol_address(vulkanLoader, "vkGetInstanceProcAddr")
-  if !found
+  defer win32.FreeLibrary(vulkanLoader)
+  getProcAddrName := cstring("vkGetInstanceProcAddr")
+  vkGetInstanceProcAddr := win32.GetProcAddress(vulkanLoader, getProcAddrName)
+  if vkGetInstanceProcAddr == nil
   {
-    fmt.eprintfln(dynlib.last_error())
+    err := win32.GetLastError()
+    fmt.printfln("Could not locate %v: %v", getProcAddrName,err)
     return
   }
   vk, ok := init_vulkan(vkGetInstanceProcAddr)
@@ -292,6 +293,7 @@ vulkan_release :: proc(handles: VulkanHandles)
 {
   vk.DestroyDevice(handles.device, nil)
   vk.DestroyInstance(handles.instance, nil)
+  fmt.println("vulkan destroyed")
 }
 
 device_suitable :: proc(device: vk.PhysicalDevice) -> bool
