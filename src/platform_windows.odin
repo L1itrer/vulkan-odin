@@ -36,6 +36,7 @@ main :: proc()
   }
   window, ok_wnd := win32_init_window(800, 600)
   if !ok_wnd do return
+  free_all(context.temp_allocator)
   for gRunning
   {
     message: win32.MSG
@@ -45,6 +46,7 @@ main :: proc()
       win32.TranslateMessage(&message)
       win32.DispatchMessageW(&message)
     }
+    free_all(context.temp_allocator)
   }
 }
 
@@ -150,14 +152,14 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
     return false
   }
 
-  requiredExtensions :: [?]string{
+  requiredExtensions :: []cstring{
     "VK_KHR_surface", 
-    "VK_KHR_win32_surface"
+    "VK_KHR_win32_surface",
   }
   valid := true
   for requiredExtension in requiredExtensions
   {
-    if !contains(extensionNames, requiredExtension)
+    if !contains(extensionNames, string(requiredExtension))
     {
       fmt.eprintfln("Device does support required extension: %v", requiredExtension)
       valid = false
@@ -207,8 +209,8 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
   createInfo: vk.InstanceCreateInfo = {
     sType = vk.StructureType.INSTANCE_CREATE_INFO,
     pApplicationInfo = &appInfo,
-    enabledExtensionCount = extensionCount,
-    ppEnabledExtensionNames = raw_data(extensionNames) // just enable all of them baby!
+    enabledExtensionCount = cast(u32)len(extensionNames),
+    ppEnabledExtensionNames = raw_data(extensionNames)
   }
   when USE_VALIDATION_LAYERS
   {
@@ -255,20 +257,19 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
     return handles, false
   }
   indicies := queue_families_find(vulkanDevice)
-  deviceFeatures := [1]vk.PhysicalDeviceFeatures{}
-  queuePriority := [1]f32{1.0}
-  queueCreateInfo: [1]vk.DeviceQueueCreateInfo = {
-    {
+  deviceFeatures := vk.PhysicalDeviceFeatures{}
+  queuePriority : f32 = 1.0
+  queueCreateInfo: vk.DeviceQueueCreateInfo = {
       sType = vk.StructureType.DEVICE_QUEUE_CREATE_INFO,
       queueFamilyIndex = indicies.graphicsFamily,
       queueCount = 1,
-      pQueuePriorities = raw_data(queuePriority[:])
-    }
+      pQueuePriorities = &queuePriority
   }
   deviceCreateInfo := vk.DeviceCreateInfo {
     sType = vk.StructureType.DEVICE_CREATE_INFO,
-    pQueueCreateInfos = raw_data(queueCreateInfo[:]),
-    pEnabledFeatures = raw_data(deviceFeatures[:]),
+    pQueueCreateInfos = &queueCreateInfo,
+    queueCreateInfoCount = 1,
+    pEnabledFeatures = &deviceFeatures,
   }
   when USE_VALIDATION_LAYERS
   {
