@@ -28,14 +28,14 @@ main :: proc()
     fmt.printfln("Could not locate %v: %v", getProcAddrName,err)
     return
   }
-  vk, ok := init_vulkan(vkGetInstanceProcAddr)
+  window, ok_wnd := win32_init_window(800, 600)
+  if !ok_wnd do return
+  vk, ok := init_vulkan(vkGetInstanceProcAddr, window)
   defer vulkan_release(vk) 
   if !ok
   {
     return
   }
-  window, ok_wnd := win32_init_window(800, 600)
-  if !ok_wnd do return
   free_all(context.temp_allocator)
   for gRunning
   {
@@ -118,9 +118,11 @@ VulkanHandles :: struct{
   instance: vk.Instance,
   device: vk.Device,
   graphicsQueue: vk.Queue,
+  surface: vk.SurfaceKHR,
 }
 
-init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, ok: bool)
+// TODO: window is only needed fo surface creation surely it can be abstracted away
+init_vulkan :: proc(vkGetInstanceProcAddr: rawptr, win32window: win32.HWND) -> (handles: VulkanHandles, ok: bool)
 {
   vk.load_proc_addresses_global(vkGetInstanceProcAddr)
   extensionCount : u32
@@ -167,6 +169,8 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
   }
   if !valid do return {}, false
 
+
+  // validation layer enumeration
   valLayerCount: u32
   vk.EnumerateInstanceLayerProperties(&valLayerCount, nil)
   validationLayerProperties := make_slice([]vk.LayerProperties, cast(int)valLayerCount, context.temp_allocator)
@@ -230,6 +234,22 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
   vk.load_proc_addresses_instance(vulkanInstance)
   fmt.println("Vulkan procedure loading succsessful")
 
+  // TODO: debug messeger setup
+
+
+  // surface creation
+  surfaceCreateInfo: vk.Win32SurfaceCreateInfoKHR = {
+    sType = vk.StructureType.WIN32_SURFACE_CREATE_INFO_KHR,
+    hwnd = win32window,
+    hinstance = cast(win32.HINSTANCE)win32.GetModuleHandleW(nil),
+  }
+
+  if (vk.CreateWin32SurfaceKHR(vulkanInstance, &surfaceCreateInfo, nil, &handles.surface) != vk.Result.SUCCESS)
+  {
+    fmt.eprintfln("could not create surface!")
+    return {}, false
+  }
+
   // device selection
   deviceCount: u32
   vulkanDevice: vk.PhysicalDevice
@@ -244,7 +264,7 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
   vk.EnumeratePhysicalDevices(vulkanInstance, &deviceCount, raw_data(devices))
   for device, i in devices
   {
-    if device_suitable(device)
+    if is_device_suitable(device, handles.surface)
     {
       fmt.println("Found a suitable vulkan device")
       vulkanDevice = device
@@ -256,7 +276,11 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
     fmt.eprintfln("This mashine has no suitable vulkan devices")
     return handles, false
   }
-  indicies := queue_families_find(vulkanDevice)
+  indicies := queue_families_find(vulkanDevice, handles.surface)
+
+  // TODO: presentation queue
+  // TODO: also does odin have some nice set concept
+  queueCreateInfos := make_slice([]vk.DeviceQueueCreateInfo, 2, context.temp_allocator)
   deviceFeatures := vk.PhysicalDeviceFeatures{}
   queuePriority : f32 = 1.0
   queueCreateInfo: vk.DeviceQueueCreateInfo = {
@@ -293,17 +317,18 @@ init_vulkan :: proc(vkGetInstanceProcAddr: rawptr) -> (handles: VulkanHandles, o
 vulkan_release :: proc(handles: VulkanHandles)
 {
   vk.DestroyDevice(handles.device, nil)
+  vk.DestroySurfaceKHR(handles.instance, handles.surface, nil)
   vk.DestroyInstance(handles.instance, nil)
   fmt.println("vulkan destroyed")
 }
 
-device_suitable :: proc(device: vk.PhysicalDevice) -> bool
+is_device_suitable :: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) -> bool
 {
-  familyIndex, ok := queue_families_find(device)
+  familyIndex, ok := queue_families_find(device, surface)
   return ok
 }
 
-queue_families_find :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, bool) #optional_ok
+queue_families_find :: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) -> (QueueFamilyIndecies, bool) #optional_ok
 {
   queueFamilyCount: u32 = ---
   queueFamilyIndex: QueueFamilyIndecies
@@ -315,8 +340,13 @@ queue_families_find :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, 
   {
     if vk.QueueFlag.GRAPHICS in family.queueFlags
     {
-      queueFamilyIndex.graphicsFamily = i
-      return queueFamilyIndex, true
+      presentSupport: b32
+      vk.GetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport)
+      if presentSupport
+      {
+        queueFamilyIndex.graphicsFamily = i
+        return queueFamilyIndex, true
+      }
     }
     i += 1
   }
@@ -325,5 +355,6 @@ queue_families_find :: proc(device: vk.PhysicalDevice) -> (QueueFamilyIndecies, 
 
 QueueFamilyIndecies :: struct
 {
-  graphicsFamily: u32
+  graphicsFamily: u32,
+  presentFamily: u32,
 }
